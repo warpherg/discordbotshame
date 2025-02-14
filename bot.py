@@ -9,10 +9,10 @@ from urllib.parse import urlparse
 
 # Environment variables
 TOKEN = os.getenv('DISCORD_TOKEN')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
+CHANNEL_ID = int(os.getenv('CHANNEL_ID', '1219326585912561715'))
 REDDIT_CLIENT_ID = os.getenv('REDDIT_CLIENT_ID')
 REDDIT_CLIENT_SECRET = os.getenv('REDDIT_CLIENT_SECRET')
-REDDIT_USER_AGENT = os.getenv('REDDIT_USER_AGENT', 'python:multireddit.bot:v2.0')
+REDDIT_USER_AGENT = os.getenv('REDDIT_USER_AGENT', 'python:multireddit.bot:v1.0')
 SUBREDDITS = os.getenv('SUBREDDITS', 'legalteens+collegesluts+gonewild18+realgirls+homemadexxx+nsfw_amateurs+normalnudes+irlgirls+camsluts+cosplaybutts').split('+')
 
 # Discord setup
@@ -22,10 +22,9 @@ client = discord.Client(intents=intents)
 
 # Configurations
 POST_CACHE = set()
-MAX_POSTS = 200
-TARGET_POSTS = 15
-CACHE_SIZE = 500
-SUBREDDIT_LIMIT = 2  # Her subreddit'ten max içerik
+MAX_POSTS = 150  # Toplam çekilecek post sayısı
+MEDIA_LIMIT = 15  # Gönderilecek içerik sayısı
+CACHE_SIZE = 300  # Maksimum önbellek boyutu
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -38,108 +37,113 @@ async def init_reddit():
         user_agent=REDDIT_USER_AGENT
     )
 
-async def fetch_content():
+async def get_reddit_media():
     try:
         reddit = await init_reddit()
-        content_pool = []
+        subreddit = await reddit.subreddit('+'.join(SUBREDDITS))
+        media_posts = []
         
-        for subreddit_name in SUBREDDITS:
-            subreddit = await reddit.subreddit(subreddit_name)
-            try:
-                async for post in subreddit.hot(limit=30):
-                    if len(content_pool) >= MAX_POSTS:
-                        break
-                        
-                    if post.id in POST_CACHE:
-                        continue
-                        
-                    # Medya URL kontrolü
-                    if hasattr(post, 'is_video') and post.is_video:
-                        url = getattr(post.media, 'fallback_url', '')
-                    else:
-                        url = getattr(post, 'url', '')
-                        
-                    if not url or 'reddit.com/gallery' in url:
-                        continue
-                        
-                    content_pool.append({
-                        'url': url,
-                        'subreddit': subreddit.display_name,
-                        'nsfw': post.over_18
-                    })
-                    POST_CACHE.add(post.id)
-                    
-            except Exception as sub_error:
-                logger.error(f"{subreddit_name} error: {str(sub_error)}")
+        async for post in subreddit.hot(limit=MAX_POSTS):
+            if len(media_posts) >= MEDIA_LIMIT * 2:  # Yeterli çeşitlilik için
+                break
                 
-            await asyncio.sleep(1)  # Rate limit önleme
+            if post.id in POST_CACHE:
+                continue
+
+            url = getattr(post, 'url', '')
+            if not url:
+                continue
+
+            # Video kontrolü
+            if getattr(post, 'is_video', False) and post.media:
+                media_url = None
+                if 'reddit_video' in post.media:
+                    media_url = post.media['reddit_video']['fallback_url']
+                elif 'dash_url' in post.media:
+                    media_url = post.media['dash_url']
+                
+                if media_url:
+                    media_posts.append({'url': media_url, 'source': post.subreddit})
+                    POST_CACHE.add(post.id)
+
+            # Resim/GIF kontrolü
+            elif hasattr(post, 'post_hint') and post.post_hint in ['image', 'rich:video']:
+                media_posts.append({'url': url, 'source': post.subreddit})
+                POST_CACHE.add(post.id)
+
+            # Önbellek temizleme
+            if len(POST_CACHE) > CACHE_SIZE:
+                POST_CACHE.pop()
 
         await reddit.close()
-        return content_pool
-        
+        return media_posts
     except Exception as e:
-        logger.error(f"Reddit connection error: {str(e)}")
+        logger.error(f"Reddit error: {str(e)}")
         return []
 
-async def send_content(channel):
+async def send_media_message(channel):
     try:
-        all_content = await fetch_content()
-        if not all_content:
-            logger.warning("No content found")
+        media_posts = await get_reddit_media()
+        if not media_posts:
+            logger.warning("No media found")
             return
 
-        # NSFW filtreleme ve karıştırma
-        safe_content = [c for c in all_content if not c['nsfw']]
-        random.shuffle(safe_content)
-        
-        # Subreddit dağılımı
+        # Benzersiz subreddit dağılımı
         selected = []
-        subreddit_counts = {sub: 0 for sub in SUBREDDITS}
+        subreddit_groups = {}
         
-        for content in safe_content:
-            sub = content['subreddit'].lower()
-            if subreddit_counts.get(sub, 0) < SUBREDDIT_LIMIT:
-                selected.append(content)
-                subreddit_counts[sub] += 1
-                
-            if len(selected) >= TARGET_POSTS:
-                break
+        for post in media_posts:
+            sub = post['source'].display_name.lower()
+            if sub not in subreddit_groups:
+                subreddit_groups[sub] = []
+            subreddit_groups[sub].append(post)
+
+        # Her subreddit'ten en fazla 2 içerik
+        for sub in subreddit_groups.values():
+            selected += random.sample(sub, min(2, len(sub)))
+
+        # Rastgele karıştır ve limit uygula
+        random.shuffle(selected)
+        final_selection = selected[:MEDIA_LIMIT]
 
         # Gönderim işlemi
-        for item in selected[:TARGET_POSTS]:
+        for post in final_selection:
             try:
-                parsed_url = urlparse(item['url'])
-                if parsed_url.scheme and parsed_url.netloc:
-                    await channel.send(f"**r/{item['subreddit']}**\n{item['url']}")
-                    await asyncio.sleep(4)  # Rate limit koruması
-            except Exception as send_error:
-                logger.error(f"Send error: {str(send_error)}")
+                parsed = urlparse(post['url'])
+                if parsed.netloc in ['v.redd.it', 'i.redd.it', 'i.imgur.com', 'gfycat.com']:
+                    await channel.send(f"**r/{post['source']}**\n{post['url']}")
+                    await asyncio.sleep(3)  # Rate limit önleme
+            except Exception as e:
+                logger.error(f"Gönderim hatası: {str(e)}")
 
     except Exception as e:
-        logger.error(f"Content processing error: {str(e)}")
+        logger.error(f"Genel hata: {str(e)}")
 
 @client.event
 async def on_ready():
-    logger.info(f'Bot aktif: {client.user}')
+    logger.info(f'{client.user} başarıyla giriş yaptı!')
+    
+    try:
+        channel = client.get_channel(CHANNEL_ID)
+        if not channel:
+            raise ValueError("Kanal bulunamadı")
+            
+        await send_media_message(channel)
+        send_media.start()
+    except Exception as e:
+        logger.error(f"Başlangıç hatası: {str(e)}")
+
+@tasks.loop(minutes=45)
+async def send_media():
     try:
         channel = client.get_channel(CHANNEL_ID)
         if channel:
-            await send_content(channel)
-            content_loop.start()
+            await send_media_message(channel)
     except Exception as e:
-        logger.error(f"Startup error: {str(e)}")
+        logger.error(f"Görev hatası: {str(e)}")
 
-@tasks.loop(minutes=60)
-async def content_loop():
-    try:
-        channel = client.get_channel(CHANNEL_ID)
-        if channel:
-            await send_content(channel)
-    except Exception as e:
-        logger.error(f"Loop error: {str(e)}")
-
-@content_loop.before_loop
-async def before_loop():
+@send_media.before_loop
+async def before_task():
     await client.wait_until_ready()
 
 if __name__ == "__main__":
