@@ -4,6 +4,8 @@ import praw
 import asyncio
 from discord.ext import tasks, commands
 from asyncpraw import Reddit  # Daha hızlı async desteği için
+from flask import Flask
+import threading
 
 # Environment variables
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -23,6 +25,17 @@ SUBREDDITS = [
     "camsluts",
     "cosplaybutts"
 ]
+
+# Flask app
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Discord bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))  # Render'ın sağladığı PORT değişkenini kullan
+    app.run(host='0.0.0.0', port=port)
 
 # Async Reddit client
 reddit = Reddit(
@@ -79,5 +92,10 @@ class RedditMediaBot(commands.Bot):
         await self.wait_until_ready()
 
 if __name__ == "__main__":
+    # Flask sunucusunu ayrı bir thread'de çalıştır
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
+
+    # Discord botunu çalıştır
     bot = RedditMediaBot()
     bot.run(DISCORD_TOKEN)
