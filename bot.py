@@ -2,8 +2,8 @@ import os
 import discord
 import praw
 import asyncio
-import time
 from discord.ext import tasks, commands
+from asyncpraw import Reddit  # Daha hızlı async desteği için
 
 # Environment variables
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -24,16 +24,16 @@ SUBREDDITS = [
     "cosplaybutts"
 ]
 
-# Reddit API setup
-reddit = praw.Reddit(
+# Async Reddit client
+reddit = Reddit(
     client_id=REDDIT_CLIENT_ID,
     client_secret=REDDIT_CLIENT_SECRET,
-    user_agent="discord-bot/1.0"
+    user_agent="discord-bot/2.0"
 )
 
 class RedditMediaBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix='!', intents=discord.Intents.default())
+        super().__init__(command_prefix='!', intents=discord.Intents.all())
         
     async def setup_hook(self):
         self.post_media.start()
@@ -44,30 +44,34 @@ class RedditMediaBot(commands.Bot):
         if not channel:
             return
 
-        # Time-based subreddit selection
-        epoch_time = int(time.time())
-        interval = (epoch_time // 60) % len(SUBREDDITS)  # 900 saniye = 15 dakika
-        target_subreddit = SUBREDDITS[interval]
+        async def process_subreddit(subreddit_name):
+            try:
+                subreddit = await reddit.subreddit(subreddit_name)
+                async for submission in subreddit.new(limit=15):
+                    if self.is_valid_media(submission):
+                        return submission.url
+                return None
+            except Exception as e:
+                print(f"Error in {subreddit_name}: {str(e)}")
+                return None
 
-        # Find valid media post
-        submission = self.find_media_post(target_subreddit)
-        if submission:
-            await channel.send(submission.url)
+        # Tüm subreddit'leri paralel işle
+        tasks = [process_subreddit(sub) for sub in SUBREDDITS]
+        results = await asyncio.gather(*tasks)
 
-    def find_media_post(self, subreddit_name):
-        for submission in reddit.subreddit(subreddit_name).new(limit=15):
-            if self.is_valid_media(submission):
-                return submission
-        return None
+        # Bulunan URL'leri gönder
+        for url in filter(None, results):
+            await channel.send(url)
+            await asyncio.sleep(1)  # Rate limit koruması
 
     def is_valid_media(self, submission):
         media_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.gifv', '.mp4', '.webm')
         return (
-            not submission.is_self and
+            not submission.over_18 and  # NSFW kontrolü kaldırıldı
             (submission.url.lower().endswith(media_extensions) or
              'redgifs' in submission.url or
              'imgur' in submission.url or
-             submission.is_video)
+             getattr(submission, 'is_video', False))
         )
 
     @post_media.before_loop
