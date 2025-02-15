@@ -1,2 +1,2 @@
 discord.py>=2.0.0
-praw>=7.0.0
+asyncpraw>=7.0.0
